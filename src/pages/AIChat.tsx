@@ -6,6 +6,8 @@ import { useNavigate } from "react-router-dom";
 import { Activity, Send, Bot, User, Sparkles } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
+import { supabase } from "@/integrations/supabase/client";
+import { logAIRequest } from "@/lib/ai-logger";
 
 interface Message {
   id: string;
@@ -17,6 +19,7 @@ interface Message {
 const AIChat = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { user } = useAuth();
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "1",
@@ -28,6 +31,8 @@ const AIChat = () => {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const conversationIdRef = useRef<string>(crypto.randomUUID());
+  const [initialLoadDone, setInitialLoadDone] = useState(false);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -37,6 +42,42 @@ const AIChat = () => {
     scrollToBottom();
   }, [messages]);
 
+  useEffect(() => {
+    if (!user || initialLoadDone) return;
+
+    const loadChatHistory = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("chat_messages")
+          .select("*")
+          .eq("user_id", user.id)
+          .order("created_at", { ascending: true })
+          .limit(50);
+
+        if (error) throw error;
+
+        if (data && data.length > 0) {
+          const loadedMessages = data.map((msg: any) => ({
+            id: msg.id,
+            role: msg.role,
+            content: msg.content,
+            timestamp: new Date(msg.created_at),
+          }));
+          setMessages(loadedMessages);
+          if (data.length > 0) {
+            conversationIdRef.current = data[0].conversation_id;
+          }
+        }
+        setInitialLoadDone(true);
+      } catch (error) {
+        console.error("Failed to load chat history:", error);
+        setInitialLoadDone(true);
+      }
+    };
+
+    loadChatHistory();
+  }, [user, initialLoadDone]);
+
   const suggestedPrompts = [
     "What should I eat for breakfast?",
     "How can I increase my protein intake?",
@@ -45,10 +86,10 @@ const AIChat = () => {
   ];
 
   const handleSend = async () => {
-    if (!input.trim() || loading) return;
+    if (!input.trim() || loading || !user) return;
 
     const userMessage: Message = {
-      id: Date.now().toString(),
+      id: crypto.randomUUID(),
       role: "user",
       content: input,
       timestamp: new Date(),
@@ -58,14 +99,22 @@ const AIChat = () => {
     setInput("");
     setLoading(true);
 
+    await supabase.from("chat_messages").insert({
+      user_id: user.id,
+      conversation_id: conversationIdRef.current,
+      role: "user",
+      content: userMessage.content,
+    });
+
+    const startTime = performance.now();
     try {
       const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-chat`;
-      
+
       const response = await fetch(CHAT_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          messages: messages.map(m => ({ role: m.role, content: m.content })).concat([{ role: userMessage.role, content: userMessage.content }]) 
+        body: JSON.stringify({
+          messages: messages.map(m => ({ role: m.role, content: m.content })).concat([{ role: userMessage.role, content: userMessage.content }])
         }),
       });
 
@@ -80,8 +129,7 @@ const AIChat = () => {
       const decoder = new TextDecoder();
       let assistantContent = "";
 
-      // Add assistant message placeholder
-      const assistantMsgId = (Date.now() + 1).toString();
+      const assistantMsgId = crypto.randomUUID();
       setMessages((prev) => [...prev, {
         id: assistantMsgId,
         role: "assistant",
@@ -95,7 +143,7 @@ const AIChat = () => {
       while (!streamDone) {
         const { done, value } = await reader.read();
         if (done) break;
-        
+
         textBuffer += decoder.decode(value, { stream: true });
 
         let newlineIndex: number;
@@ -134,7 +182,30 @@ const AIChat = () => {
         }
       }
 
+      const responseTime = performance.now() - startTime;
+
+      await supabase.from("chat_messages").insert({
+        user_id: user.id,
+        conversation_id: conversationIdRef.current,
+        role: "assistant",
+        content: assistantContent,
+      });
+
+      await logAIRequest({
+        requestType: "chat",
+        responseTimeMs: Math.round(responseTime),
+        status: "success",
+      });
+
     } catch (error: any) {
+      const responseTime = performance.now() - startTime;
+      await logAIRequest({
+        requestType: "chat",
+        responseTimeMs: Math.round(responseTime),
+        status: "error",
+        errorMessage: error.message,
+      });
+
       console.error("Chat error:", error);
       toast({
         title: "Chat error",

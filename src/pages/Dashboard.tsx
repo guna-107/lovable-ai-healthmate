@@ -23,6 +23,8 @@ const Dashboard = () => {
   const navigate = useNavigate();
   const { user, signOut } = useAuth();
   const [loading, setLoading] = useState(true);
+  const [recommendations, setRecommendations] = useState<string[]>([]);
+  const [recommendationsLoading, setRecommendationsLoading] = useState(false);
 
   const [dailyStats, setDailyStats] = useState({
     calories: { current: 0, target: 2000, unit: "kcal" },
@@ -67,10 +69,47 @@ const Dashboard = () => {
           steps: { current: log.steps || 0, target: 10000, unit: "steps" },
         }));
       }
+
+      loadRecommendations();
     } catch (error) {
       console.error("Error loading dashboard data:", error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadRecommendations = async () => {
+    setRecommendationsLoading(true);
+    try {
+      const RECOMMENDATIONS_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/get-recommendations`;
+
+      const response = await fetch(RECOMMENDATIONS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stats: {
+            calories: dailyStats.calories.current,
+            calorieTarget: dailyStats.calories.target,
+            protein: dailyStats.protein.current,
+            proteinTarget: dailyStats.protein.target,
+            water: dailyStats.water.current,
+            waterTarget: dailyStats.water.target,
+            steps: dailyStats.steps.current,
+            stepsTarget: dailyStats.steps.target,
+          }
+        }),
+      });
+
+      if (!response.ok) throw new Error('Failed to fetch recommendations');
+
+      const data = await response.json();
+      if (data.recommendations && Array.isArray(data.recommendations)) {
+        setRecommendations(data.recommendations.slice(0, 3));
+      }
+    } catch (error) {
+      console.error("Error loading recommendations:", error);
+    } finally {
+      setRecommendationsLoading(false);
     }
   };
 
@@ -206,14 +245,25 @@ const Dashboard = () => {
               <CardDescription>Personalized tips based on your progress</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              {aiTips.map((tip, index) => (
-                <div
-                  key={index}
-                  className="p-4 rounded-lg bg-muted/50 border border-border/50 hover:border-primary/50 transition-colors"
-                >
-                  <p className="text-sm">{tip}</p>
-                </div>
-              ))}
+              {recommendations.length > 0 ? (
+                recommendations.map((tip, index) => (
+                  <div
+                    key={index}
+                    className="p-4 rounded-lg bg-muted/50 border border-border/50 hover:border-primary/50 transition-colors"
+                  >
+                    <p className="text-sm">{tip}</p>
+                  </div>
+                ))
+              ) : (
+                aiTips.map((tip, index) => (
+                  <div
+                    key={index}
+                    className="p-4 rounded-lg bg-muted/50 border border-border/50 hover:border-primary/50 transition-colors"
+                  >
+                    <p className="text-sm">{tip}</p>
+                  </div>
+                ))
+              )}
             </CardContent>
           </Card>
 

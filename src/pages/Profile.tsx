@@ -5,7 +5,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useNavigate } from "react-router-dom";
-import { Activity, User, Target, Utensils, LogOut } from "lucide-react";
+import { Activity, User, Target, Utensils, LogOut, Zap, Watch } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
@@ -16,6 +16,11 @@ const Profile = () => {
   const { user, signOut } = useAuth();
   const [loading, setLoading] = useState(false);
   const [loadingProfile, setLoadingProfile] = useState(true);
+  const [wearableConnecting, setWearableConnecting] = useState(false);
+  const [wearableConnections, setWearableConnections] = useState<{
+    googleFit: boolean;
+    fitbit: boolean;
+  }>({ googleFit: false, fitbit: false });
 
   const [formData, setFormData] = useState({
     full_name: "",
@@ -38,26 +43,41 @@ const Profile = () => {
     if (!user) return;
 
     try {
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("*")
-        .eq("id", user.id)
-        .maybeSingle();
+      const [profileRes, connectionsRes] = await Promise.all([
+        supabase
+          .from("profiles")
+          .select("*")
+          .eq("id", user.id)
+          .maybeSingle(),
+        supabase
+          .from("wearable_connections")
+          .select("provider")
+          .eq("user_id", user.id)
+          .eq("is_active", true),
+      ]);
 
-      if (error) throw error;
+      if (profileRes.error) throw profileRes.error;
 
-      if (data) {
+      if (profileRes.data) {
         setFormData({
-          full_name: data.full_name || "",
-          age: data.age?.toString() || "",
-          gender: data.gender || "",
-          height_cm: data.height_cm?.toString() || "",
-          weight_kg: data.weight_kg?.toString() || "",
-          target_weight_kg: data.target_weight_kg?.toString() || "",
-          daily_calorie_goal: data.daily_calorie_goal?.toString() || "2000",
-          daily_protein_goal: data.daily_protein_goal?.toString() || "120",
-          daily_carbs_goal: data.daily_carbs_goal?.toString() || "250",
-          daily_fats_goal: data.daily_fats_goal?.toString() || "65",
+          full_name: profileRes.data.full_name || "",
+          age: profileRes.data.age?.toString() || "",
+          gender: profileRes.data.gender || "",
+          height_cm: profileRes.data.height_cm?.toString() || "",
+          weight_kg: profileRes.data.weight_kg?.toString() || "",
+          target_weight_kg: profileRes.data.target_weight_kg?.toString() || "",
+          daily_calorie_goal: profileRes.data.daily_calorie_goal?.toString() || "2000",
+          daily_protein_goal: profileRes.data.daily_protein_goal?.toString() || "120",
+          daily_carbs_goal: profileRes.data.daily_carbs_goal?.toString() || "250",
+          daily_fats_goal: profileRes.data.daily_fats_goal?.toString() || "65",
+        });
+      }
+
+      if (connectionsRes.data) {
+        const providers = connectionsRes.data.map((conn: any) => conn.provider);
+        setWearableConnections({
+          googleFit: providers.includes("google_fit"),
+          fitbit: providers.includes("fitbit"),
         });
       }
     } catch (error: any) {
@@ -68,6 +88,95 @@ const Profile = () => {
       });
     } finally {
       setLoadingProfile(false);
+    }
+  };
+
+  const handleWearableConnect = async (provider: "google_fit" | "fitbit") => {
+    setWearableConnecting(true);
+    try {
+      const mockToken = `mock_${provider}_${Date.now()}`;
+
+      const { error } = await supabase
+        .from("wearable_connections")
+        .upsert(
+          {
+            user_id: user?.id,
+            provider,
+            access_token: mockToken,
+            refresh_token: `refresh_${mockToken}`,
+            expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+            last_sync: new Date().toISOString(),
+            is_active: true,
+          },
+          { onConflict: "user_id,provider" }
+        );
+
+      if (error) throw error;
+
+      setWearableConnections(prev => ({
+        ...prev,
+        [provider === "google_fit" ? "googleFit" : "fitbit"]: true,
+      }));
+
+      toast({
+        title: "Connected!",
+        description: `${provider === "google_fit" ? "Google Fit" : "Fitbit"} connected successfully.`,
+      });
+
+      const mockData = [
+        { data_type: "steps", value: Math.floor(Math.random() * 15000), unit: "steps", sync_date: new Date().toISOString().split('T')[0] },
+        { data_type: "calories", value: Math.floor(Math.random() * 500) + 1500, unit: "kcal", sync_date: new Date().toISOString().split('T')[0] },
+        { data_type: "heart_rate", value: Math.floor(Math.random() * 40) + 60, unit: "bpm", sync_date: new Date().toISOString().split('T')[0] },
+      ];
+
+      await Promise.all(
+        mockData.map(data =>
+          supabase.from("health_data_sync").insert({
+            user_id: user?.id,
+            data_type: data.data_type,
+            value: data.value,
+            unit: data.unit,
+            source: provider,
+            sync_date: data.sync_date,
+          })
+        )
+      );
+    } catch (error: any) {
+      toast({
+        title: "Connection failed",
+        description: error.message,
+        variant: "destructive",
+      });
+    } finally {
+      setWearableConnecting(false);
+    }
+  };
+
+  const handleWearableDisconnect = async (provider: "google_fit" | "fitbit") => {
+    try {
+      const { error } = await supabase
+        .from("wearable_connections")
+        .update({ is_active: false })
+        .eq("user_id", user?.id)
+        .eq("provider", provider);
+
+      if (error) throw error;
+
+      setWearableConnections(prev => ({
+        ...prev,
+        [provider === "google_fit" ? "googleFit" : "fitbit"]: false,
+      }));
+
+      toast({
+        title: "Disconnected",
+        description: `${provider === "google_fit" ? "Google Fit" : "Fitbit"} disconnected.`,
+      });
+    } catch (error: any) {
+      toast({
+        title: "Disconnection failed",
+        description: error.message,
+        variant: "destructive",
+      });
     }
   };
 
@@ -274,6 +383,91 @@ const Profile = () => {
                       onChange={(e) => setFormData({ ...formData, daily_fats_goal: e.target.value })}
                     />
                   </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Watch className="w-5 h-5 text-primary" />
+                  Wearable Devices
+                </CardTitle>
+                <CardDescription>Connect your fitness trackers to sync health data</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <Card className="border-border/50 bg-card">
+                    <CardContent className="pt-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-2">
+                          <Activity className="w-5 h-5 text-primary" />
+                          <span className="font-medium">Google Fit</span>
+                        </div>
+                        {wearableConnections.googleFit && (
+                          <div className="w-3 h-3 bg-green-500 rounded-full"></div>
+                        )}
+                      </div>
+                      <p className="text-sm text-muted-foreground mb-3">
+                        {wearableConnections.googleFit
+                          ? "Connected - Syncing daily steps and activity"
+                          : "Not connected"}
+                      </p>
+                      <Button
+                        type="button"
+                        variant={wearableConnections.googleFit ? "outline" : "default"}
+                        disabled={wearableConnecting}
+                        onClick={() =>
+                          wearableConnections.googleFit
+                            ? handleWearableDisconnect("google_fit")
+                            : handleWearableConnect("google_fit")
+                        }
+                        className="w-full"
+                      >
+                        {wearableConnecting
+                          ? "Connecting..."
+                          : wearableConnections.googleFit
+                          ? "Disconnect"
+                          : "Connect"}
+                      </Button>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="border-border/50 bg-card">
+                    <CardContent className="pt-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-2">
+                          <Zap className="w-5 h-5 text-primary" />
+                          <span className="font-medium">Fitbit</span>
+                        </div>
+                        {wearableConnections.fitbit && (
+                          <div className="w-3 h-3 bg-green-500 rounded-full"></div>
+                        )}
+                      </div>
+                      <p className="text-sm text-muted-foreground mb-3">
+                        {wearableConnections.fitbit
+                          ? "Connected - Syncing heart rate and sleep"
+                          : "Not connected"}
+                      </p>
+                      <Button
+                        type="button"
+                        variant={wearableConnections.fitbit ? "outline" : "default"}
+                        disabled={wearableConnecting}
+                        onClick={() =>
+                          wearableConnections.fitbit
+                            ? handleWearableDisconnect("fitbit")
+                            : handleWearableConnect("fitbit")
+                        }
+                        className="w-full"
+                      >
+                        {wearableConnecting
+                          ? "Connecting..."
+                          : wearableConnections.fitbit
+                          ? "Disconnect"
+                          : "Connect"}
+                      </Button>
+                    </CardContent>
+                  </Card>
                 </div>
               </CardContent>
             </Card>

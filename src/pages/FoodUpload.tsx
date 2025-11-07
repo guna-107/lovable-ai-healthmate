@@ -9,6 +9,7 @@ import { Activity, Camera, Upload, Loader2, Check, Edit3 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
+import { logAIRequest } from "@/lib/ai-logger";
 
 interface NutritionData {
   meal_name: string;
@@ -50,9 +51,9 @@ const FoodUpload = () => {
     if (!imageFile) return;
 
     setAnalyzing(true);
+    const startTime = performance.now();
 
     try {
-      // Convert image to base64
       const reader = new FileReader();
       const base64Promise = new Promise<string>((resolve) => {
         reader.onloadend = () => resolve(reader.result as string);
@@ -60,20 +61,35 @@ const FoodUpload = () => {
       reader.readAsDataURL(imageFile);
       const imageBase64 = await base64Promise;
 
-      // Call edge function for AI analysis
       const { data, error } = await supabase.functions.invoke('analyze-food', {
         body: { imageBase64 }
       });
 
       if (error) throw error;
 
+      const responseTime = performance.now() - startTime;
+
       setNutritionData(data);
+
+      await logAIRequest({
+        requestType: "food_analysis",
+        responseTimeMs: Math.round(responseTime),
+        status: "success",
+      });
 
       toast({
         title: "Food analyzed!",
         description: "AI has identified your meal and calculated nutrition values.",
       });
     } catch (error: any) {
+      const responseTime = performance.now() - startTime;
+      await logAIRequest({
+        requestType: "food_analysis",
+        responseTimeMs: Math.round(responseTime),
+        status: "error",
+        errorMessage: error.message,
+      });
+
       console.error('Analysis error:', error);
       toast({
         title: "Analysis failed",
