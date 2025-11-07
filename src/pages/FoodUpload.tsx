@@ -52,25 +52,32 @@ const FoodUpload = () => {
     setAnalyzing(true);
 
     try {
-      await new Promise(resolve => setTimeout(resolve, 2000));
-
-      setNutritionData({
-        meal_name: "Grilled Chicken Salad",
-        calories: 450,
-        protein_g: 35,
-        carbs_g: 25,
-        fats_g: 18,
-        fiber_g: 8,
+      // Convert image to base64
+      const reader = new FileReader();
+      const base64Promise = new Promise<string>((resolve) => {
+        reader.onloadend = () => resolve(reader.result as string);
       });
+      reader.readAsDataURL(imageFile);
+      const imageBase64 = await base64Promise;
+
+      // Call edge function for AI analysis
+      const { data, error } = await supabase.functions.invoke('analyze-food', {
+        body: { imageBase64 }
+      });
+
+      if (error) throw error;
+
+      setNutritionData(data);
 
       toast({
         title: "Food analyzed!",
         description: "AI has identified your meal and calculated nutrition values.",
       });
     } catch (error: any) {
+      console.error('Analysis error:', error);
       toast({
         title: "Analysis failed",
-        description: error.message,
+        description: error.message || "Please try again",
         variant: "destructive",
       });
     } finally {

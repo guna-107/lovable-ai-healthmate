@@ -5,6 +5,7 @@ import { Card } from "@/components/ui/card";
 import { useNavigate } from "react-router-dom";
 import { Activity, Send, Bot, User, Sparkles } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { useToast } from "@/hooks/use-toast";
 
 interface Message {
   id: string;
@@ -15,7 +16,7 @@ interface Message {
 
 const AIChat = () => {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { toast } = useToast();
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "1",
@@ -58,43 +59,92 @@ const AIChat = () => {
     setLoading(true);
 
     try {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-chat`;
+      
+      const response = await fetch(CHAT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          messages: messages.map(m => ({ role: m.role, content: m.content })).concat([{ role: userMessage.role, content: userMessage.content }]) 
+        }),
+      });
 
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Failed to get response');
+      }
+
+      if (!response.body) throw new Error('No response body');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let assistantContent = "";
+
+      // Add assistant message placeholder
+      const assistantMsgId = (Date.now() + 1).toString();
+      setMessages((prev) => [...prev, {
+        id: assistantMsgId,
         role: "assistant",
-        content: generateMockResponse(input),
+        content: "",
         timestamp: new Date(),
-      };
+      }]);
 
-      setMessages((prev) => [...prev, assistantMessage]);
-    } catch (error) {
+      let textBuffer = "";
+      let streamDone = false;
+
+      while (!streamDone) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        textBuffer += decoder.decode(value, { stream: true });
+
+        let newlineIndex: number;
+        while ((newlineIndex = textBuffer.indexOf("\n")) !== -1) {
+          let line = textBuffer.slice(0, newlineIndex);
+          textBuffer = textBuffer.slice(newlineIndex + 1);
+
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          if (line.startsWith(":") || line.trim() === "") continue;
+          if (!line.startsWith("data: ")) continue;
+
+          const jsonStr = line.slice(6).trim();
+          if (jsonStr === "[DONE]") {
+            streamDone = true;
+            break;
+          }
+
+          try {
+            const parsed = JSON.parse(jsonStr);
+            const content = parsed.choices?.[0]?.delta?.content;
+            if (content) {
+              assistantContent += content;
+              setMessages((prev) => {
+                const newMessages = [...prev];
+                const lastMsg = newMessages[newMessages.length - 1];
+                if (lastMsg.role === "assistant") {
+                  lastMsg.content = assistantContent;
+                }
+                return newMessages;
+              });
+            }
+          } catch {
+            textBuffer = line + "\n" + textBuffer;
+            break;
+          }
+        }
+      }
+
+    } catch (error: any) {
       console.error("Chat error:", error);
+      toast({
+        title: "Chat error",
+        description: error.message || "Failed to get AI response",
+        variant: "destructive",
+      });
+      setMessages((prev) => prev.slice(0, -1));
     } finally {
       setLoading(false);
     }
-  };
-
-  const generateMockResponse = (userInput: string): string => {
-    const lowerInput = userInput.toLowerCase();
-
-    if (lowerInput.includes("breakfast")) {
-      return "For a healthy breakfast, I recommend:\n\n1. Greek yogurt with berries and nuts (300 cal, 20g protein)\n2. Oatmeal with banana and almond butter (350 cal, 12g protein)\n3. Egg white omelet with vegetables (250 cal, 25g protein)\n\nThese options provide a good balance of protein, healthy fats, and complex carbs to start your day!";
-    }
-
-    if (lowerInput.includes("protein")) {
-      return "Great question! Here are some excellent ways to increase protein:\n\n1. Add lean meats: chicken breast, turkey, fish (30-40g per serving)\n2. Include protein shakes between meals (20-30g per shake)\n3. Snack on Greek yogurt, cottage cheese, or nuts\n4. Try plant-based options: lentils, quinoa, tofu\n5. Add protein powder to smoothies or oatmeal\n\nAim for 0.8-1g of protein per pound of body weight daily!";
-    }
-
-    if (lowerInput.includes("workout")) {
-      return "Here's a quick 20-minute full-body workout:\n\n1. Warm-up: 3 min jumping jacks\n2. Push-ups: 3 sets of 10-15\n3. Squats: 3 sets of 15-20\n4. Plank: 3 sets of 30-60 seconds\n5. Lunges: 3 sets of 10 per leg\n6. Burpees: 2 sets of 10\n7. Cool-down: 3 min stretching\n\nDo this 3-4 times per week for best results!";
-    }
-
-    if (lowerInput.includes("meal prep")) {
-      return "Meal prep made easy! Here's a simple plan:\n\n**Sunday Prep:**\n1. Cook 4-5 chicken breasts\n2. Prepare 3 cups of brown rice\n3. Chop vegetables (broccoli, carrots, peppers)\n4. Make 2 types of sauce (teriyaki, lemon herb)\n\n**Monday-Friday:**\nMix and match proteins, rice, and veggies in containers. Each meal: ~400-500 calories, 30g protein.\n\nStore in fridge for 4-5 days. This saves time and keeps you on track!";
-    }
-
-    return "That's a great question! Based on your health goals, I recommend focusing on balanced nutrition with adequate protein, staying hydrated, and maintaining consistent meal timing. Would you like specific advice on meals, workouts, or tracking your progress?";
   };
 
   const handleSuggestedPrompt = (prompt: string) => {
