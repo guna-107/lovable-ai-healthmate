@@ -2,16 +2,156 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from './types';
 
-const SUPABASE_URL = "https://ygedaehnnwepxipzvfxh.supabase.co";
-const SUPABASE_PUBLISHABLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlnZWRhZWhubndlcHhpcHp2ZnhoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIzOTgzNjIsImV4cCI6MjA3Nzk3NDM2Mn0.83UkkgZGiU75OVYtTOV9SCCpTIjTFys2Sbiw30GMimo";
+// Rate limiting configuration
+const RATE_LIMIT = {
+  MAX_REQUESTS: 100,
+  WINDOW_MS: 60000, // 1 minute
+};
 
-// Import the supabase client like this:
-// import { supabase } from "@/integrations/supabase/client";
+// Track request counts
+const requestCounts = new Map<string, { count: number; resetTime: number }>();
 
-export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+// Secure storage implementation
+const secureStorage = {
+  getItem: (key: string): string | null => {
+    try {
+      return localStorage.getItem(key);
+    } catch (error) {
+      console.error('Error accessing localStorage:', error);
+      return null;
+    }
+  },
+  setItem: (key: string, value: string): void => {
+    try {
+      localStorage.setItem(key, value);
+    } catch (error) {
+      console.error('Error writing to localStorage:', error);
+    }
+  },
+  removeItem: (key: string): void => {
+    try {
+      localStorage.removeItem(key);
+    } catch (error) {
+      console.error('Error removing from localStorage:', error);
+    }
+  },
+};
+
+// Validate environment variables
+const validateEnv = () => {
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new Error(
+      'Missing Supabase environment variables. Please check your .env file.'
+    );
+  }
+
+  return { supabaseUrl, supabaseAnonKey };
+};
+
+// Rate limiting middleware
+const withRateLimit = async <T>(
+  operation: () => Promise<T>,
+  identifier: string = 'global'
+): Promise<T> => {
+  const now = Date.now();
+  const windowStart = now - RATE_LIMIT.WINDOW_MS;
+  
+  // Clean up old entries
+  for (const [key, value] of requestCounts.entries()) {
+    if (value.resetTime < windowStart) {
+      requestCounts.delete(key);
+    }
+  }
+
+  const requestInfo = requestCounts.get(identifier) || { 
+    count: 0, 
+    resetTime: now + RATE_LIMIT.WINDOW_MS 
+  };
+
+  if (requestInfo.count >= RATE_LIMIT.MAX_REQUESTS) {
+    throw new Error('Rate limit exceeded. Please try again later.');
+  }
+
+  requestInfo.count++;
+  requestCounts.set(identifier, requestInfo);
+
+  try {
+    return await operation();
+  } catch (error) {
+    console.error('Supabase operation failed:', error);
+    throw error;
+  }
+};
+
+const { supabaseUrl, supabaseAnonKey } = validateEnv();
+
+// Create the Supabase client with enhanced security settings
+export const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey, {
   auth: {
-    storage: localStorage,
+    storage: secureStorage,
     persistSession: true,
     autoRefreshToken: true,
-  }
+    detectSessionInUrl: true,
+    flowType: 'pkce', // More secure than implicit flow
+  },
+  global: {
+    headers: {
+      'X-Client-Info': 'ai-healthmate/1.0',
+    },
+  },
 });
+
+// Add session validation
+const validateSession = async () => {
+  const { data: { session }, error } = await supabase.auth.getSession();
+  
+  if (error) {
+    console.error('Session validation error:', error);
+    return false;
+  }
+  
+  if (!session) {
+    return false;
+  }
+  
+  // Check if session is expired
+  const now = Math.floor(Date.now() / 1000);
+  if (session.expires_at && session.expires_at < now) {
+    await supabase.auth.signOut();
+    return false;
+  }
+  
+  return true;
+};
+
+// Export a wrapped version of supabase with rate limiting
+export const secureSupabase = {
+  ...supabase,
+  auth: {
+    ...supabase.auth,
+    signInWithPassword: async (credentials: any) => 
+      withRateLimit(() => supabase.auth.signInWithPassword(credentials), 'auth'),
+    signUp: async (credentials: any) => 
+      withRateLimit(() => supabase.auth.signUp(credentials), 'auth'),
+    signOut: async () => 
+      withRateLimit(() => supabase.auth.signOut(), 'auth'),
+    getSession: async () => 
+      withRateLimit(() => validateSession().then(() => supabase.auth.getSession()), 'session'),
+  },
+  // Add other methods as needed
+};
+
+// This file should not be edited directly. Configure your environment variables in the .env file.
+// For production deployments, ensure proper CORS and security headers are configured in your hosting provider.
+
+declare global {
+  interface Window {
+    env: {
+      VITE_SUPABASE_URL: string;
+      VITE_SUPABASE_ANON_KEY: string;
+    };
+  }
+}
