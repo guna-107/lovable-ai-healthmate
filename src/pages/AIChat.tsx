@@ -130,11 +130,14 @@ const AIChat = () => {
 
     const startTime = performance.now();
     try {
-      const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-chat`;
+      const CHAT_URL = `https://ygedaehnnwepxipzvfxh.supabase.co/functions/v1/ai-chat`;
 
       const response = await fetch(CHAT_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlnZWRhZWhubndlcHhpcHp2ZnhoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIzOTgzNjIsImV4cCI6MjA3Nzk3NDM2Mn0.83UkkgZGiU75OVYtTOV9SCCpTIjTFys2Sbiw30GMimo`,
+        },
         body: JSON.stringify({
           messages: messages.map(m => ({ role: m.role, content: m.content })).concat([{ role: userMessage.role, content: userMessage.content }])
         }),
