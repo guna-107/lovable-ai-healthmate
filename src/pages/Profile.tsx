@@ -5,10 +5,13 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useNavigate } from "react-router-dom";
-import { Activity, User, Target, Utensils, LogOut, Zap, Watch } from "lucide-react";
+import { Activity, User, Target, Utensils, LogOut, Zap, Watch, RefreshCw } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
+import { useWearableOAuth } from "@/hooks/useWearableOAuth";
+import { useWearableSync } from "@/hooks/useWearableSync";
+import { Badge } from "@/components/ui/badge";
 
 const Profile = () => {
   const navigate = useNavigate();
@@ -16,11 +19,14 @@ const Profile = () => {
   const { user, signOut } = useAuth();
   const [loading, setLoading] = useState(false);
   const [loadingProfile, setLoadingProfile] = useState(true);
-  const [wearableConnecting, setWearableConnecting] = useState(false);
   const [wearableConnections, setWearableConnections] = useState<{
     googleFit: boolean;
     fitbit: boolean;
   }>({ googleFit: false, fitbit: false });
+
+  // OAuth and sync hooks
+  const { connecting, initiateOAuth, disconnectWearable } = useWearableOAuth();
+  const { syncStatus, manualSync } = useWearableSync(user?.id);
 
   const [formData, setFormData] = useState({
     full_name: "",
@@ -92,86 +98,53 @@ const Profile = () => {
   };
 
   const handleWearableConnect = async (provider: "google_fit" | "fitbit") => {
-    setWearableConnecting(true);
-    try {
-      const mockToken = `mock_${provider}_${Date.now()}`;
+    // In production, you need to set up OAuth apps and get client IDs
+    // Google Fit: https://console.cloud.google.com/
+    // Fitbit: https://dev.fitbit.com/apps
+    
+    const CLIENT_IDS = {
+      google_fit: 'YOUR_GOOGLE_CLIENT_ID', // Replace with actual client ID
+      fitbit: 'YOUR_FITBIT_CLIENT_ID', // Replace with actual client ID
+    };
 
-      const { error } = await supabase
-        .from("wearable_connections")
-        .upsert(
-          {
-            user_id: user?.id,
-            provider,
-            access_token: mockToken,
-            refresh_token: `refresh_${mockToken}`,
-            expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-            last_sync: new Date().toISOString(),
-            is_active: true,
-          },
-          { onConflict: "user_id,provider" }
-        );
-
-      if (error) throw error;
-
-      setWearableConnections(prev => ({
-        ...prev,
-        [provider === "google_fit" ? "googleFit" : "fitbit"]: true,
-      }));
-
+    const clientId = CLIENT_IDS[provider];
+    
+    if (clientId.startsWith('YOUR_')) {
       toast({
-        title: "Connected!",
-        description: `${provider === "google_fit" ? "Google Fit" : "Fitbit"} connected successfully.`,
+        title: 'Configuration Required',
+        description: `Please configure ${provider === 'google_fit' ? 'Google Fit' : 'Fitbit'} OAuth client ID in Profile.tsx`,
+        variant: 'destructive',
       });
+      return;
+    }
 
-      const mockData = [
-        { data_type: "steps", value: "12500", unit: "steps", sync_date: new Date().toISOString().split('T')[0] },
-        { data_type: "calories", value: "2000", unit: "kcal", sync_date: new Date().toISOString().split('T')[0] },
-        { data_type: "heart_rate", value: "72", unit: "bpm", sync_date: new Date().toISOString().split('T')[0] },
-      ];
-
-      await Promise.all(
-        mockData.map(data =>
-          supabase.from("health_data_sync").insert({
-            user_id: user?.id || '',
-            provider,
-            sync_date: data.sync_date,
-            steps: data.data_type === 'steps' ? parseInt(data.value) : null,
-            calories_burned: data.data_type === 'calories' ? parseInt(data.value) : null,
-            sleep_hours: data.data_type === 'sleep' ? parseFloat(data.value) : null,
-            heart_rate_avg: data.data_type === 'heart_rate' ? parseInt(data.value) : null,
-          })
-        )
-      );
+    try {
+      await initiateOAuth(provider, clientId);
+      loadProfile(); // Reload after connection
     } catch (error: any) {
       toast({
-        title: "Connection failed",
+        title: 'Connection failed',
         description: error.message,
-        variant: "destructive",
+        variant: 'destructive',
       });
-    } finally {
-      setWearableConnecting(false);
     }
   };
 
   const handleWearableDisconnect = async (provider: "google_fit" | "fitbit") => {
     try {
-      const { error } = await supabase
-        .from("wearable_connections")
-        .update({ is_active: false })
-        .eq("user_id", user?.id)
-        .eq("provider", provider);
-
-      if (error) throw error;
-
-      setWearableConnections(prev => ({
-        ...prev,
+      await disconnectWearable(provider);
+      
+      setWearableConnections({
+        ...wearableConnections,
         [provider === "google_fit" ? "googleFit" : "fitbit"]: false,
-      }));
+      });
 
       toast({
         title: "Disconnected",
-        description: `${provider === "google_fit" ? "Google Fit" : "Fitbit"} disconnected.`,
+        description: `Successfully disconnected from ${provider === "google_fit" ? "Google Fit" : "Fitbit"}`,
       });
+      
+      loadProfile();
     } catch (error: any) {
       toast({
         title: "Disconnection failed",
@@ -414,10 +387,32 @@ const Profile = () => {
                           ? "Connected - Syncing daily steps and activity"
                           : "Not connected"}
                       </p>
+                      {wearableConnections.googleFit && syncStatus.google_fit && (
+                        <div className="text-xs text-muted-foreground mb-3 flex items-center gap-2">
+                          {syncStatus.google_fit.syncing ? (
+                            <>
+                              <RefreshCw className="w-3 h-3 animate-spin" />
+                              Syncing...
+                            </>
+                          ) : (
+                            <>
+                              Last sync: {syncStatus.google_fit.lastSync?.toLocaleTimeString() || 'Never'}
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => manualSync('google_fit')}
+                                className="h-6 px-2"
+                              >
+                                <RefreshCw className="w-3 h-3" />
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      )}
                       <Button
                         type="button"
                         variant={wearableConnections.googleFit ? "outline" : "default"}
-                        disabled={wearableConnecting}
+                        disabled={connecting}
                         onClick={() =>
                           wearableConnections.googleFit
                             ? handleWearableDisconnect("google_fit")
@@ -425,7 +420,7 @@ const Profile = () => {
                         }
                         className="w-full"
                       >
-                        {wearableConnecting
+                        {connecting
                           ? "Connecting..."
                           : wearableConnections.googleFit
                           ? "Disconnect"
@@ -450,10 +445,32 @@ const Profile = () => {
                           ? "Connected - Syncing heart rate and sleep"
                           : "Not connected"}
                       </p>
+                      {wearableConnections.fitbit && syncStatus.fitbit && (
+                        <div className="text-xs text-muted-foreground mb-3 flex items-center gap-2">
+                          {syncStatus.fitbit.syncing ? (
+                            <>
+                              <RefreshCw className="w-3 h-3 animate-spin" />
+                              Syncing...
+                            </>
+                          ) : (
+                            <>
+                              Last sync: {syncStatus.fitbit.lastSync?.toLocaleTimeString() || 'Never'}
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => manualSync('fitbit')}
+                                className="h-6 px-2"
+                              >
+                                <RefreshCw className="w-3 h-3" />
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      )}
                       <Button
                         type="button"
                         variant={wearableConnections.fitbit ? "outline" : "default"}
-                        disabled={wearableConnecting}
+                        disabled={connecting}
                         onClick={() =>
                           wearableConnections.fitbit
                             ? handleWearableDisconnect("fitbit")
@@ -461,7 +478,7 @@ const Profile = () => {
                         }
                         className="w-full"
                       >
-                        {wearableConnecting
+                        {connecting
                           ? "Connecting..."
                           : wearableConnections.fitbit
                           ? "Disconnect"
@@ -469,6 +486,11 @@ const Profile = () => {
                       </Button>
                     </CardContent>
                   </Card>
+                </div>
+                <div className="text-xs text-muted-foreground mt-4 p-3 bg-muted/30 rounded-lg">
+                  <strong>Note:</strong> OAuth credentials must be configured for production use. 
+                  Real-time syncing occurs automatically every 15 minutes and on connection changes.
+                  Works on both web and mobile platforms.
                 </div>
               </CardContent>
             </Card>
